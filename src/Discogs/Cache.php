@@ -1,0 +1,191 @@
+<?php
+
+declare(strict_types=1);
+
+#############################################################################
+# imdbGraphQLPHP                                          (c) Ed (duck7000) #
+# written by Ed                                                             #
+# ------------------------------------------------------------------------- #
+# This program is free software; you can redistribute and/or modify it      #
+# under the terms of the GNU General Public License (see doc/LICENSE)       #
+#############################################################################
+
+namespace Discogs;
+
+use Psr\Log\LoggerInterface;
+use Psr\SimpleCache\CacheInterface;
+
+/**
+ * File caching
+ * Caches files to disk in cacheDir optionally gzipping if cacheUseZip
+ *
+ */
+class Cache implements CacheInterface
+{
+
+    protected $config;
+    protected $logger;
+
+    /**
+     * Cache constructor.
+     * @param Config $config
+     * @param LoggerInterface $logger
+     * @throws Exception
+     */
+    public function __construct(Config $config, LoggerInterface $logger)
+    {
+        $this->config = $config;
+        $this->logger = $logger;
+        if (($this->config->cacheUse || $this->config->cacheStore) && !is_dir($this->config->cacheDir)) {
+            @mkdir($this->config->cacheDir, 0700, true);
+            if (!is_dir($this->config->cacheDir)) {
+                $this->logger->critical("[Cache] Configured cache directory [{$this->config->cacheDir}] does not exist!");
+                throw new Exception("[Cache] Configured cache directory [{$this->config->cacheDir}] does not exist!");
+            }
+        }
+        if ($this->config->cacheStore && !is_writable($this->config->cacheDir)) {
+            $this->logger->critical("[Cache] Configured cache directory [{$this->config->cacheDir}] lacks write permission!");
+            throw new Exception("[Cache] Configured cache directory [{$this->config->cacheDir}] lacks write permission!");
+        }
+        // @TODO add a limit on how frequently a purge can occur
+        $this->purge();
+    }
+
+    /**
+     * Fetches a value from the cache
+     * @param string $key     The unique key of this item in the cache
+     * @param mixed  $default Default value to return if the key does not exist
+     * @return mixed
+     * @throws \Psr\SimpleCache\InvalidArgumentException
+     *   MUST be thrown if the $key string is not a legal value
+     */
+    public function get(string $key, mixed $default = null): mixed
+    {
+        if (!$this->config->cacheUse) {
+            return $default;
+        }
+        $cleanKey = $this->sanitiseKey($key);
+        $fname = $this->config->cacheDir . '/' . $cleanKey;
+        if (!file_exists($fname)) {
+            $this->logger->debug("[Cache] Cache miss for [$key]");
+            return $default;
+        }
+        $this->logger->debug("[Cache] Cache hit for [$key]");
+        if ($this->config->cacheUseZip) {
+            $content = file_get_contents('compress.zlib://' . $fname); // This can read uncompressed files too
+            if (!$content) {
+                return $default;
+            }
+            if ($this->config->cacheConvertZip) {
+                @$fp = fopen($fname, "r");
+                $zipchk = fread($fp, 2);
+                fclose($fp);
+                if (!($zipchk[0] == chr(31) && $zipchk[1] == chr(139))) { //checking for zip header
+                    /* converting on access */
+                    file_put_contents('compress.zlib://' . $fname, $content);
+                }
+            }
+            return $content;
+        } else { // no zip
+            return file_get_contents($fname);
+        }
+    }
+
+    /**
+     * Persists data in the cache, uniquely referenced by a key with an optional expiration TTL time
+     * @param string $key   The key of the item to store
+     * @param mixed $value The value of the item to store, must be serializable
+     * @param null|int|DateInterval $ttl   Optional. The TTL value of this item. If no value is sent and
+     *                                     the driver supports TTL then the library may set a default value
+     *                                     for it or let the driver take care of that
+     * @return bool
+     */
+    public function set(string $key, mixed $value, null|int|\DateInterval $ttl = null): bool
+    {
+        if (!$this->config->cacheStore) {
+            return false;
+        }
+        $cleanKey = $this->sanitiseKey($key);
+        $fname = $this->config->cacheDir . '/' . $cleanKey;
+        $this->logger->debug("[Cache] Writing key [$key] to [$fname]");
+        if ($this->config->cacheUseZip) {
+            $fp = gzopen($fname, "w");
+            gzputs($fp, $value);
+            gzclose($fp);
+        } else { // no zip
+            file_put_contents($fname, $value);
+        }
+        return true;
+    }
+
+    /**
+     * This method looks for files older than the cache_expire set in the
+     * \Imdb\Config and removes them
+     * @return void
+     */
+    public function purge(): void
+    {
+        if (!$this->config->cacheStore || $this->config->cacheExpire == 0) {
+            return;
+        }
+        $cacheDir = $this->config->cacheDir;
+        $this->logger->debug("[Cache] Purging old cache entries");
+        $thisdir = dir($cacheDir);
+        $now = time();
+        while ($file = $thisdir->read()) {
+            if ($file != "." && $file != ".." && $file != ".placeholder") {
+                $fname = $cacheDir . '/' . $file;
+                if (is_dir($fname)) {
+                    continue;
+                }
+                $mod = filemtime($fname);
+                if ($mod && ($now - $mod > $this->config->cacheExpire)) {
+                    unlink($fname);
+                }
+            }
+        }
+        $thisdir->close();
+    }
+
+    /**
+     * Replace characters the OS won't like using with the filesystem
+     * @param string $key   The key of the item to sanitise
+     * @return string
+     */
+    protected function sanitiseKey(string $key): string
+    {
+        return str_replace(array('/', '\\', '?', '%', '*', ':', '|', '"', '<', '>'), '.', $key);
+    }
+
+    // Some empty functions so we match the interface. These will never be used
+    public function getMultiple(iterable $keys, mixed $default = null): iterable
+    {
+        return [];
+    }
+
+    public function clear(): bool
+    {
+        return false;
+    }
+
+    public function delete(string $key): bool
+    {
+        return false;
+    }
+
+    public function deleteMultiple(iterable $keys): bool
+    {
+        return false;
+    }
+
+    public function has(string $key): bool
+    {
+        return false;
+    }
+
+    public function setMultiple(iterable $values, null|int|\DateInterval $ttl = null): bool
+    {
+        return false;
+    }
+
+}
