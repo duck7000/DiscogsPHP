@@ -13,7 +13,7 @@ Quick Start
 * If you're not using composer or an autoloader include `bootstrap.php`.
 * Get some data
 ```php
-$title = new \Discogs\Release(125489); // id is integer
+$title = new \Discogs\Release(125489); // id is always int!
 $artist = $title->getReleaseData();
 
 
@@ -27,7 +27,7 @@ Get the files with one of:
 * [Zip/Tar download]
 
 ### Requirements
-* PHP >= 8.3 or higher (lower version are not supported)
+* PHP >= 8.3 or higher (lower version are not supported!)
 * PHP cURL extension
 
 
